@@ -1,0 +1,17 @@
+---
+title: "BIOS658 Final Project"
+author: "Amanda Robinson"
+date: "December 1, 2025"
+output:
+  html_document:
+    code_folding: show
+    toc: true
+    toc_float:
+      collapsed: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, error = FALSE, 
+                      message = FALSE)
+```
+
