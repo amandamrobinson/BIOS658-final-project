@@ -15,3 +15,18 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE, error = FALSE,
                       message = FALSE)
 ```
 
+```{r data}
+library(tidyverse)
+library(GEOquery)
+
+#Data obtained from https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE231347
+#read_csv() automatically unzips .gz files
+gene_counts <- read_csv("GSE231347_counts.csv.gz")
+
+gse <- getGEO("GSE231347", GSEMatrix = TRUE)
+#Extract the expression set
+gse_data <- gse[[1]]
+
+# Create colData data frame from GEO phenoData.
+phenotype <- pData(gse_data)
+```
