@@ -1,5 +1,6 @@
 ---
-title: "BIOS658 Final Project"
+title: "Method Comparison: LME vs. EdgeR for Crossover Design"
+subtitle: "BIOS658 Final Project"
 author: "Amanda Robinson"
 date: "December 1, 2025"
 output:
@@ -15,9 +16,23 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE, error = FALSE,
                       message = FALSE)
 ```
 
+# Introduction
+
+# Methods
+
+# Results
+
+## Quality Assessment
+
 ```{r data}
 library(tidyverse)
 library(GEOquery)
+library(pheatmap)
+library(edgeR)
+
+#To track figure and table numbers
+fig.num <- 0
+tab.num <- 0
 
 #Data obtained from https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE231347
 #read_csv() automatically unzips .gz files
@@ -27,6 +42,73 @@ gse <- getGEO("GSE231347", GSEMatrix = TRUE)
 #Extract the expression set
 gse_data <- gse[[1]]
 
-# Create colData data frame from GEO phenoData.
-phenotype <- pData(gse_data)
+# Create data frame from GEO phenoData.
+phenotype <- pData(gse_data) %>%
+  rename(condition = `condition:ch1`, 
+         mdd_phenotype = `mdd phenotype:ch1`, 
+         timepoint = `time point:ch1`) %>%
+  dplyr::select(title, geo_accession, mdd_phenotype, condition, timepoint)
 ```
+
+```{r qa-library-size}
+library_size <- gene_counts %>%
+  #Remove gene column
+  select(-gene) %>%
+  #Count the number of reads per sample
+  colSums()
+
+#Summary statistics for text
+lib_summ <- round(quantile(library_size, c(0.25, 0.5, 0.75))/1000000, 1)
+```
+
+```{r qa-library-size-fig}
+fig.num <- fig.num + 1
+
+ggplot() + 
+  geom_boxplot(aes(y = library_size/1000000)) +
+  ylab("Library Size (Millions)") +
+  ggtitle(paste0("Figure ", fig.num, ": Distribution of Library Size")) +
+  theme_bw()
+```
+
+```{r qa-count-distribution}
+gene_counts_long <- gene_counts %>%
+  pivot_longer(-gene, names_to = "sample", values_to = "count") %>%
+  mutate(log2_count = log2(count + 1))
+
+log2_q3_range <- gene_counts_long %>%
+  group_by(sample) %>%
+  summarise(q3 = quantile(log2_count, 0.75)) %>%
+  summarise(min = min(q3), 
+            max = max(q3))
+```
+
+```{r qa-count-distribution-fig}
+fig.num <- fig.num + 1
+
+gene_counts_long %>%
+  ggplot() + 
+  geom_boxplot(aes(y = log2_count, x = sample)) +
+  xlab("Sample") +
+  ylab("Log2 Count + 1") +
+  ggtitle(paste0("Figure ", fig.num, ": Distribution of Gene Count by Sample")) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank())
+```
+
+```{r qa-sample-correlation}
+
+```
+
+## Preprocessing
+
+## Batch Effect Correction
+
+## Differential Expression Analysis
+
+## Functional Enrichment Analysis
+
+# Discussion
+
+# Bibliography
