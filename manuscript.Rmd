@@ -29,6 +29,7 @@ library(tidyverse)
 library(GEOquery)
 library(pheatmap)
 library(limma)
+library(sva)
 library(edgeR)
 
 #To track figure and table numbers
@@ -145,10 +146,20 @@ y <- normLibSizes(y)
 
 #D. Estimating Dispersion
 #The authors recommend calculating the overall and tag-wise dispersion
-y <- estimateDisp(y_test, design = design)
+y <- estimateDisp(y, design = design)
 ```
 
 ## Batch Effect Correction
+
+```{r sva}
+pca <- prcomp(t(y), scale. = TRUE)
+summary(pca)
+```
+
+```{r pca-comparison}
+class()
+```
+
 
 ## Differential Expression Analysis
 
