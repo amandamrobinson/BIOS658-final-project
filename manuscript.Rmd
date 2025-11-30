@@ -28,6 +28,7 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE, error = FALSE,
 library(tidyverse)
 library(GEOquery)
 library(pheatmap)
+library(limma)
 library(edgeR)
 
 #To track figure and table numbers
@@ -47,13 +48,16 @@ phenotype <- pData(gse_data) %>%
   rename(condition = `condition:ch1`, 
          mdd_phenotype = `mdd phenotype:ch1`, 
          timepoint = `time point:ch1`) %>%
-  dplyr::select(title, geo_accession, mdd_phenotype, condition, timepoint)
+  mutate(id = str_extract(title, "G[0-9]+")) %>%
+  filter(timepoint == "T105") %>%
+  dplyr::select(title, id, mdd_phenotype, condition)
+
+gene_counts <- gene_counts[, c("gene", phenotype$title)]
 ```
 
 ```{r qa-library-size}
 library_size <- gene_counts %>%
-  #Remove gene column
-  select(-gene) %>%
+  dplyr::select(-gene) %>%
   #Count the number of reads per sample
   colSums()
 
@@ -97,15 +101,64 @@ gene_counts_long %>%
         axis.ticks.x = element_blank())
 ```
 
+```{r housekeeping}
+gene_counts <- gene_counts %>%
+  dplyr::select(-gene) %>%
+  as.matrix()
+
+# phenotype$title == colnames(gene_counts)
+```
+
+
 ```{r qa-sample-correlation}
 
 ```
 
 ## Preprocessing
 
+```{r preprocessing-no-id}
+TypeCondition <- interaction(phenotype$mdd_phenotype, phenotype$condition)
+
+#No ID
+#We will also need the design matrix
+design <- model.matrix(~ TypeCondition)
+
+#A. Format data as a DGEList
+#We need to create a DGEList object to feed into the edgeR functions. 
+y <- DGEList(counts = gene_counts, genes = rownames(gene_counts), 
+             group = TypeCondition)
+
+#B. Filter
+#The documentation recommends filtering out genes with low or zero counts across
+#all samples using this code. It also says you can include variables of 
+#scientific interest (group in our case) in this step, which I choose to do 
+#here.
+keep <- filterByExpr(y, group = TypeCondition)
+#We need to recalculate library size since we removed some genes
+y <- y[keep, , keep.lib.sizes = FALSE]
+
+#C. Normalization
+#A few highly expressed genes may account for most of the library size, 
+#resulting in under-sampling of genes with lower expression. We can address this
+#issue through normalization. 
+y <- normLibSizes(y)
+
+#D. Estimating Dispersion
+#The authors recommend calculating the overall and tag-wise dispersion
+y <- estimateDisp(y_test, design = design)
+```
+
 ## Batch Effect Correction
 
 ## Differential Expression Analysis
+
+```{r differential-expression}
+#E. Fit and Test Model
+#I am using the quasi-likelihood pipeline
+#"The QL F-tests provide more rigorous error rate control compared to methods 
+#that do not fully account for the uncertainty in quasi-dispersion estimation."
+fit_edgeR <- glmQLFit(y, design)
+```
 
 ## Functional Enrichment Analysis
 
