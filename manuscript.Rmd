@@ -321,7 +321,21 @@ results <- topTags(qlf_interaction,
                    sort.by = "PValue", 
                    #And us BH adjustment to control FDR
                    adjust.method = "BH")
+```
 
+```{r volcano-plot}
+fig.num <- fig.num + 1
+
+results$table %>%
+  mutate(neg_log10_p = -log10(PValue),
+         status = case_when(PValue < 0.001 & logFC >= 1 ~ "Upregulated",
+                            PValue < 0.001 & logFC <= -1 ~ "Downregulated",
+                            TRUE ~ "Not Significant")
+  ggplot() + 
+  geom_point(aes(x = logFC, y = neg_log10_p))
+```
+
+```{r}
 top10 <- results$table[1:10, ]
 
 top10
