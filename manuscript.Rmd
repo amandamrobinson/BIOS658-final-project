@@ -103,24 +103,49 @@ gene_counts_long %>%
 ```
 
 ```{r housekeeping}
+genes <- gene_counts$gene
+
 gene_counts <- gene_counts %>%
   dplyr::select(-gene) %>%
   as.matrix()
+
+rownames(gene_counts) <- genes
 
 # phenotype$title == colnames(gene_counts)
 ```
 
 
 ```{r qa-sample-correlation}
+logCPM <- cpm(gene_counts, log = TRUE)
 
+sample_cor <- cor(logCPM, method = "pearson")
+
+gene_centered <- scale(t(gene_counts), center = TRUE, scale = FALSE)
+
+annotation_data <- data.frame(
+  Group = phenotype$mdd_phenotype,
+  Visit = phenotype$condition, 
+  id = phenotype$id,
+  row.names = colnames(sample_cor) # Ensure row names match sample names
+)
+
+pheatmap(
+  sample_cor,
+  annotation_col = annotation_data,
+  show_rownames = FALSE,
+  show_colnames = FALSE,
+  clustering_distance_rows = "euclidean",
+  clustering_distance_cols = "euclidean",
+  clustering_method = "complete",
+  main = "Sample Correlation"
+)
 ```
 
 ## Preprocessing
 
-```{r preprocessing-no-id}
+```{r preprocessing}
 TypeCondition <- interaction(phenotype$mdd_phenotype, phenotype$condition)
 
-#No ID
 #We will also need the design matrix
 design <- model.matrix(~ TypeCondition)
 
@@ -143,32 +168,129 @@ y <- y[keep, , keep.lib.sizes = FALSE]
 #resulting in under-sampling of genes with lower expression. We can address this
 #issue through normalization. 
 y <- normLibSizes(y)
-
-#D. Estimating Dispersion
-#The authors recommend calculating the overall and tag-wise dispersion
-y <- estimateDisp(y, design = design)
 ```
 
 ## Batch Effect Correction
 
 ```{r sva}
-pca <- prcomp(t(y), scale. = TRUE)
-summary(pca)
+mod0 <- model.matrix(~1, data = phenotype)  # null model (intercept-only)
+# Estimate number of surrogate variables automatically (Leek method)
+n.sv <- num.sv(y$counts, design, method = "be")
+
+# Run svaseq to estimate surrogate variables
+svseq <- svaseq(dat = y$counts, mod = design, mod0 = mod0, n.sv = n.sv)
+
+# Remove surrogate variable effects using limma::removeBatchEffect (treat sv's as covariates)
+sv_mat <- svseq$sv
+sva_corrected <- limma::removeBatchEffect(cpm(y, log = TRUE), 
+                                          covariates = sv_mat)
+
+colnames(sv_mat) <- paste0("SV", 1:ncol(sv_mat))
+
+phenotype <- cbind(phenotype, sv_mat) 
 ```
 
-```{r pca-comparison}
-class()
+```{r pca-tab}
+tab.num <- tab.num + 1
+
+pca <- prcomp(t(cpm(y, log = TRUE)), scale. = TRUE)
+pca_sva <- prcomp(t(sva_corrected), scale. = TRUE)
+
+rbind(summary(pca)$importance, 
+      summary(pca_sva)$importance) %>%
+  data.frame() %>%
+  rownames_to_column(var = "Measure") %>%
+  mutate(SVA = c(rep("No SVA", 3), rep("SVA", 3)), 
+         Measure = str_remove(str_replace_all(Measure, "[.]", " "), 
+                              "[0-9]+"), 
+         across(is.numeric, round, 4)) %>%
+  dplyr::select(SVA, Measure, contains("PC")) %>%
+  DT::datatable(rownames = FALSE, 
+                caption = paste0("Table ", tab.num, 
+                                 ": PCA Variance Explained Before and After SVA Correction"),
+                # Display only 10 rows per page
+                options = list(pageLength = 10,
+                # Optional: adds vertical scrolling if needed
+                scrollY = "400px", 
+                # Removes the search bar and only keeps table/pagination
+                dom = 'tp', 
+                # Enables pagination
+                paging = TRUE, 
+                scrollX = TRUE))
 ```
 
+```{r pca-fig}
+fig.num <- fig.num + 1
+
+phenotype %>%
+  select(id, mdd_phenotype, condition) %>%
+  mutate(pc1_nosva = pca$x[, 1], 
+         pc2_nosva = pca$x[, 2], 
+         pc1_sva = pca_sva$x[, 1], 
+         pc2_sva = pca_sva$x[, 2]) %>%
+  pivot_longer(c(-id, -mdd_phenotype, -condition), names_to = "method_pc", 
+               values_to = "value") %>%
+  separate_wider_delim(cols = method_pc, delim = "_", 
+                       names = c("pc", "method")) %>%
+  mutate(method = factor(method, levels = c("nosva", "sva"), 
+                         labels = c("No SVA", "SVA")), 
+         condition = factor(condition, levels = c("S", "NS"), 
+                            labels = c("Stress Test", "Control"))) %>%
+  pivot_wider(names_from = pc, values_from = value) %>%
+  ggplot() + 
+  geom_point(aes(x = pc1, y = pc2, color = mdd_phenotype)) +
+  labs(title = paste0("Figiure ", fig.num, ": Principle Components by Condition and Batch Effect Correction"), 
+       x = "PC1", 
+       y = "PC2", 
+       color = "Phagia") +
+  theme_bw() +
+  facet_grid(condition~method) +
+  theme(legend.position = "bottom")
+```
+
+```{r hierarchical-clustering}
+gene_iqr <- apply(logCPM, 1, IQR)
+names(gene_iqr) <- rownames(gene_counts)
+
+
+# Determine the cutoff for the top 10% most variable genes
+iqr_cutoff <- quantile(gene_iqr, 0.90)
+
+# Select the genes that exceed the cutoff
+# This set of genes will be used for BOTH the Before and After SVA plots.
+top_10_percent_genes <- names(gene_iqr[gene_iqr >= iqr_cutoff])
+
+fig.num <- fig.num + 1
+pheatmap(
+  logCPM[top_10_percent_genes, ], # Use UNCORRECTED data
+  annotation_col = annotation_data, 
+  show_rownames = FALSE,
+  show_colnames = FALSE,
+  clustering_distance_rows = "euclidean",
+  clustering_distance_cols = "euclidean",
+  main = paste0("Figure ", fig.num, ": Clustering of Top 10% Genes (Before SVA Correction)"),
+  fontsize = 8
+)
+```
 
 ## Differential Expression Analysis
 
 ```{r differential-expression}
+design_final <- model.matrix(as.formula(paste0("~ mdd_phenotype + condition + 
+                                               mdd_phenotype * condition +", 
+                                               paste0("SV", 1:ncol(sv_mat), 
+                                                      collapse = " + "))), 
+                             data = phenotype)
+
+#D. Estimating Dispersion
+#The authors recommend calculating the overall and tag-wise dispersion
+y <- estimateDisp(y, design = design_final)
+
 #E. Fit and Test Model
 #I am using the quasi-likelihood pipeline
 #"The QL F-tests provide more rigorous error rate control compared to methods 
 #that do not fully account for the uncertainty in quasi-dispersion estimation."
-fit_edgeR <- glmQLFit(y, design)
+fit_edgeR <- glmQLFit(y, design_final)
 ```
 
 ## Functional Enrichment Analysis
