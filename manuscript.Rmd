@@ -51,7 +51,11 @@ phenotype <- pData(gse_data) %>%
          timepoint = `time point:ch1`) %>%
   mutate(id = str_extract(title, "G[0-9]+")) %>%
   filter(timepoint == "T105") %>%
-  dplyr::select(title, id, mdd_phenotype, condition)
+  group_by(id) %>%
+  add_count() %>%
+  filter(n > 1) %>%
+  dplyr::select(title, id, mdd_phenotype, condition) %>%
+  ungroup()
 
 gene_counts <- gene_counts[, c("gene", phenotype$title)]
 ```
@@ -180,7 +184,8 @@ n.sv <- num.sv(y$counts, design, method = "be")
 # Run svaseq to estimate surrogate variables
 svseq <- svaseq(dat = y$counts, mod = design, mod0 = mod0, n.sv = n.sv)
 
-# Remove surrogate variable effects using limma::removeBatchEffect (treat sv's as covariates)
+# Remove surrogate variable effects using limma::removeBatchEffect (treat sv's 
+#as covariates)
 sv_mat <- svseq$sv
 sva_corrected <- limma::removeBatchEffect(cpm(y, log = TRUE), 
                                           covariates = sv_mat)
@@ -248,10 +253,9 @@ phenotype %>%
   theme(legend.position = "bottom")
 ```
 
-```{r hierarchical-clustering}
-gene_iqr <- apply(logCPM, 1, IQR)
-names(gene_iqr) <- rownames(gene_counts)
-
+```{r hierarchical-clustering-1}
+gene_iqr <- apply(cpm(y, log = TRUE), 1, IQR)
+names(gene_iqr) <- y$genes$genes
 
 # Determine the cutoff for the top 10% most variable genes
 iqr_cutoff <- quantile(gene_iqr, 0.90)
@@ -263,12 +267,28 @@ top_10_percent_genes <- names(gene_iqr[gene_iqr >= iqr_cutoff])
 fig.num <- fig.num + 1
 pheatmap(
   logCPM[top_10_percent_genes, ], # Use UNCORRECTED data
-  annotation_col = annotation_data, 
   show_rownames = FALSE,
   show_colnames = FALSE,
+  annotation = annotation_data, 
   clustering_distance_rows = "euclidean",
   clustering_distance_cols = "euclidean",
-  main = paste0("Figure ", fig.num, ": Clustering of Top 10% Genes (Before SVA Correction)"),
+  main = paste0("Figure ", fig.num, 
+                ": Clustering of Top 10% Genes (Before SVA Correction)"),
+  fontsize = 8
+)
+```
+
+```{r hierarchical-clustering-2}
+fig.num <- fig.num + 1
+pheatmap(
+  sva_corrected[top_10_percent_genes, ], # Use CORRECTED data
+  show_rownames = FALSE,
+  show_colnames = FALSE,
+  annotation = annotation_data, 
+  clustering_distance_rows = "euclidean",
+  clustering_distance_cols = "euclidean",
+  main = paste0("Figure ", fig.num, 
+                ": Clustering of Top 10% Genes (After SVA Correction)"),
   fontsize = 8
 )
 ```
@@ -291,6 +311,42 @@ y <- estimateDisp(y, design = design_final)
 #"The QL F-tests provide more rigorous error rate control compared to methods 
 #that do not fully account for the uncertainty in quasi-dispersion estimation."
 fit_edgeR <- glmQLFit(y, design_final)
+
+qlf_interaction <- glmQLFTest(fit_edgeR, coef = "mdd_phenotypeHypo:conditionS")
+
+results <- topTags(qlf_interaction, 
+                   #We want to keep any gene that meets our criteria
+                   n = Inf, 
+                   #We will use p-values to determine which genes to keep
+                   sort.by = "PValue", 
+                   #And us BH adjustment to control FDR
+                   adjust.method = "BH")
+
+top10 <- results$table[1:10, ]
+
+top10
+```
+
+```{r boxplot}
+fig.num <- fig.num + 1
+
+sva_corrected[top10$genes, ] %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column("title") %>%
+  pivot_longer(-title, names_to = "gene", values_to = "count") %>%
+  left_join(phenotype) %>%
+  mutate(condition = factor(condition, levels = c("S", "NS"), 
+                            labels = c("Stress Test", "Control"))) %>%
+  ggplot() + 
+  geom_boxplot(aes(x = mdd_phenotype, y = count, color = fct_rev(condition))) +
+  labs(title = paste0("Figure ", fig.num, ": SVA Corrected Log CPM by MDD Phenotype, Condition, and Gene"), 
+       x = "MDD Phenotype", 
+       y = "SVA Corrected Log CPM", 
+       color = "") +
+  facet_wrap(~gene, ncol = 5) + 
+  theme_bw() +
+  theme(legend.position = "bottom")
 ```
 
 ## Functional Enrichment Analysis
