@@ -36,6 +36,9 @@ library(clusterProfiler)
 library(org.Hs.eg.db)
 library(AnnotationDbi)
 
+options(scipen = 999)
+set.seed(38451)
+
 #To track figure and table numbers
 fig.num <- 0
 tab.num <- 0
@@ -53,14 +56,26 @@ phenotype <- pData(gse_data) %>%
   dplyr::rename(condition = `condition:ch1`, 
                 mdd_phenotype = `mdd phenotype:ch1`, 
                 timepoint = `time point:ch1`) %>%
+  #The sample IDs are a concatenation of subject id, mdd_phenotype, and visit
+  #I need to extract the subject ID
   mutate(id = str_extract(title, "G[0-9]+")) %>%
+  #Like the original paper, we will restrict the model to observations after the
+  #subject completed the stress test or control waiting time
   filter(timepoint == "T105") %>%
+  #There were some subjects with only one record. To identify them I looked at 
+  #each subject
   group_by(id) %>%
+  #Counted how many records they had
   add_count() %>%
+  #And filtered the data to only those subjects that had more than one 
+  #observation
   filter(n > 1) %>%
+  #I only keep the information needed for my analysis
   dplyr::select(title, id, mdd_phenotype, condition) %>%
   ungroup()
 
+#Restrict gene_counts to only those observations retained in phenotype after 
+#filtering
 gene_counts <- gene_counts[, c("gene", phenotype$title)]
 ```
 
@@ -85,13 +100,20 @@ ggplot() +
 ```
 
 ```{r qa-count-distribution}
+#I want to make gene_counts long for ease of summary and plotting
 gene_counts_long <- gene_counts %>%
   pivot_longer(-gene, names_to = "sample", values_to = "count") %>%
+  #I will display log2 expression due to skewed count distributions for some 
+  #samples
   mutate(log2_count = log2(count + 1))
 
+#Summary statistics for text
 log2_q3_range <- gene_counts_long %>%
+  #For each sample
   group_by(sample) %>%
+  #Find Q3
   summarise(q3 = quantile(log2_count, 0.75)) %>%
+  #The find the min and max Q3
   summarise(min = min(q3), 
             max = max(q3))
 ```
@@ -111,47 +133,56 @@ gene_counts_long %>%
 ```
 
 ```{r housekeeping}
+#Retain the list of genes in the data
 genes <- gene_counts$gene
 
+#I kept gene_counts as a data frame up to this point for visualization and 
+#summary, but I will need it to be a matrix for the rest of the analysis
 gene_counts <- gene_counts %>%
   dplyr::select(-gene) %>%
   as.matrix()
 
+#Assign gene names as the rownames of gene_counts
 rownames(gene_counts) <- genes
 
+#Checks to make sure the columns of gene_counts align with the rows of phenotype
 # phenotype$title == colnames(gene_counts)
 ```
 
 
 ```{r qa-sample-correlation}
+fig.num <- fig.num + 1
+
+#Pearson correlation assumes a normal distribution, so I normalize gene_counts 
+#to counts per million and take the log since counts are not normal
 logCPM <- cpm(gene_counts, log = TRUE)
 
 sample_cor <- cor(logCPM, method = "pearson")
 
-gene_centered <- scale(t(gene_counts), center = TRUE, scale = FALSE)
+#Data for figure annotation
+annotation_data <- data.frame(Group = phenotype$mdd_phenotype,
+                              Visit = phenotype$condition, 
+                              id = phenotype$id,
+                              row.names = colnames(sample_cor))
 
-annotation_data <- data.frame(
-  Group = phenotype$mdd_phenotype,
-  Visit = phenotype$condition, 
-  id = phenotype$id,
-  row.names = colnames(sample_cor) # Ensure row names match sample names
-)
-
-pheatmap(
-  sample_cor,
-  annotation_col = annotation_data,
-  show_rownames = FALSE,
-  show_colnames = FALSE,
-  clustering_distance_rows = "euclidean",
-  clustering_distance_cols = "euclidean",
-  clustering_method = "complete",
-  main = "Sample Correlation"
-)
+pheatmap(sample_cor,
+         annotation_col = annotation_data,
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean",
+         clustering_method = "complete",
+         main = paste0("Figure ", fig.num, 
+                       ": Sample Correlation of LogCPM Gene Count by Subject, Visit, and Group"))
 ```
 
 ## Preprocessing
 
 ```{r preprocessing}
+#This is equivalent to the mdd_phenotype + condition + mdd_phenotype * condition
+#model that I end up fitting as part of the differential expression analysis. 
+#It allows me to have one group variable for the purposes of normalization and
+#filtering.
 TypeCondition <- interaction(phenotype$mdd_phenotype, phenotype$condition)
 
 #We will also need the design matrix
@@ -165,8 +196,8 @@ y <- DGEList(counts = gene_counts, genes = rownames(gene_counts),
 #B. Filter
 #The documentation recommends filtering out genes with low or zero counts across
 #all samples using this code. It also says you can include variables of 
-#scientific interest (group in our case) in this step, which I choose to do 
-#here.
+#scientific interest (TypeCondition in our case) in this step, which I choose to
+#do here.
 keep <- filterByExpr(y, group = TypeCondition)
 #We need to recalculate library size since we removed some genes
 y <- y[keep, , keep.lib.sizes = FALSE]
@@ -181,8 +212,11 @@ y <- normLibSizes(y)
 ## Batch Effect Correction
 
 ```{r sva}
-mod0 <- model.matrix(~1, data = phenotype)  # null model (intercept-only)
-# Estimate number of surrogate variables automatically (Leek method)
+#Null model
+mod0 <- model.matrix(~1, data = phenotype)  
+#Estimate number of surrogate variables. Leek returned a large number of SVs 
+#relative to my sample size, so I used the less conservative BE method.
+# n.sv <- num.sv(y$counts, design, method = "leek")
 n.sv <- num.sv(y$counts, design, method = "be")
 
 # Run svaseq to estimate surrogate variables
@@ -191,20 +225,27 @@ svseq <- svaseq(dat = y$counts, mod = design, mod0 = mod0, n.sv = n.sv)
 # Remove surrogate variable effects using limma::removeBatchEffect (treat sv's 
 #as covariates)
 sv_mat <- svseq$sv
-sva_corrected <- limma::removeBatchEffect(cpm(y, log = TRUE), 
-                                          covariates = sv_mat)
+#logCPM of SV corrected counts
+sva_corrected <- removeBatchEffect(cpm(y, log = TRUE), covariates = sv_mat)
 
+#Give clearer names to the columns of sv_mat
 colnames(sv_mat) <- paste0("SV", 1:ncol(sv_mat))
 
+#Add sv_mat to phenotype
 phenotype <- cbind(phenotype, sv_mat) 
 ```
 
 ```{r pca-tab}
 tab.num <- tab.num + 1
 
-pca <- prcomp(t(cpm(y, log = TRUE)), scale. = TRUE)
+logCPM <- cpm(y, log = TRUE)
+
+#PCA assumes normally distributed data, so we use logCMP
+pca <- prcomp(t(logCPM), scale. = TRUE)
+#And SV corrected logCPM
 pca_sva <- prcomp(t(sva_corrected), scale. = TRUE)
 
+#Combine summary measures into a single table for display
 rbind(summary(pca)$importance, 
       summary(pca_sva)$importance) %>%
   data.frame() %>%
@@ -237,18 +278,23 @@ phenotype %>%
          pc2_nosva = pca$x[, 2], 
          pc1_sva = pca_sva$x[, 1], 
          pc2_sva = pca_sva$x[, 2]) %>%
+  #I want one record per sample, pc, and presence of batch effect correction
   pivot_longer(c(-id, -mdd_phenotype, -condition), names_to = "method_pc", 
                values_to = "value") %>%
+  #Divide method_pc into two columns
   separate_wider_delim(cols = method_pc, delim = "_", 
                        names = c("pc", "method")) %>%
+  #Clean up labels
   mutate(method = factor(method, levels = c("nosva", "sva"), 
                          labels = c("No SVA", "SVA")), 
          condition = factor(condition, levels = c("S", "NS"), 
                             labels = c("Stress Test", "Control"))) %>%
+  #Reformat data so there is one record per sample and batch effect correction
   pivot_wider(names_from = pc, values_from = value) %>%
   ggplot() + 
   geom_point(aes(x = pc1, y = pc2, color = mdd_phenotype)) +
-  labs(title = paste0("Figiure ", fig.num, ": Principle Components by Condition and Batch Effect Correction"), 
+  labs(title = paste0("Figiure ", fig.num, 
+                      ": Principle Components by Condition, Batch Effect Correction, and MDD Phenotype"), 
        x = "PC1", 
        y = "PC2", 
        color = "Phagia") +
@@ -258,41 +304,46 @@ phenotype %>%
 ```
 
 ```{r hierarchical-clustering-1}
-gene_iqr <- apply(cpm(y, log = TRUE), 1, IQR)
+fig.num <- fig.num + 1
+
+#Find the IQR for each gene. This is a more robust measure than SD
+gene_iqr <- apply(logCPM, 1, IQR)
 names(gene_iqr) <- y$genes$genes
 
-# Determine the cutoff for the top 10% most variable genes
+#Determine the cutoff for the top 10% most variable genes
 iqr_cutoff <- quantile(gene_iqr, 0.90)
 
-# Select the genes that exceed the cutoff
-# This set of genes will be used for BOTH the Before and After SVA plots.
+#Select the genes that exceed the cutoff
+#This set of genes will be used for BOTH the Before and After SVA plots.
 top_10_percent_genes <- names(gene_iqr[gene_iqr >= iqr_cutoff])
 
-fig.num <- fig.num + 1
 pheatmap(
-  logCPM[top_10_percent_genes, ], # Use UNCORRECTED data
+  #Uses uncorrected data
+  logCPM[top_10_percent_genes, ], 
   show_rownames = FALSE,
   show_colnames = FALSE,
   annotation = annotation_data, 
   clustering_distance_rows = "euclidean",
   clustering_distance_cols = "euclidean",
   main = paste0("Figure ", fig.num, 
-                ": Clustering of Top 10% Genes (Before SVA Correction)"),
+                ": Clustering of Top 10% Genes Before SVA Correction"),
   fontsize = 8
 )
 ```
 
 ```{r hierarchical-clustering-2}
 fig.num <- fig.num + 1
+
 pheatmap(
-  sva_corrected[top_10_percent_genes, ], # Use CORRECTED data
+  #Uses SV corrected data
+  sva_corrected[top_10_percent_genes, ],
   show_rownames = FALSE,
   show_colnames = FALSE,
   annotation = annotation_data, 
   clustering_distance_rows = "euclidean",
   clustering_distance_cols = "euclidean",
   main = paste0("Figure ", fig.num, 
-                ": Clustering of Top 10% Genes (After SVA Correction)"),
+                ": Clustering of Top 10% Genes After SVA Correction"),
   fontsize = 8
 )
 ```
@@ -300,6 +351,7 @@ pheatmap(
 ## Differential Expression Analysis
 
 ```{r differential-expression}
+#Update design matrix to include SVs
 design_final <- model.matrix(as.formula(paste0("~ mdd_phenotype + condition + 
                                                mdd_phenotype * condition +", 
                                                paste0("SV", 1:ncol(sv_mat), 
@@ -316,6 +368,8 @@ y <- estimateDisp(y, design = design_final)
 #that do not fully account for the uncertainty in quasi-dispersion estimation."
 fit_edgeR <- glmQLFit(y, design_final)
 
+#I want to test the interaction to see if there is a significant difference in 
+#expression across mdd_phenotype after the stress test
 qlf_interaction <- glmQLFTest(fit_edgeR, coef = "mdd_phenotypeHypo:conditionS")
 
 results <- topTags(qlf_interaction, 
@@ -326,6 +380,7 @@ results <- topTags(qlf_interaction,
                    #And us BH adjustment to control FDR
                    adjust.method = "BH")
 
+#results is ordered by ascending p-value
 top10 <- results$table[1:10, ]
 ```
 
@@ -357,8 +412,8 @@ results$table %>%
                   size = 3, max.overlaps = 15) +
   labs(title = paste0("Figure ", fig.num, 
                       ": Volcano Plot with Top Gene Labels"), 
-       x = "Log FC", 
-       y = "- Log10 p-value", 
+       x = "LogFC", 
+       y = "-Log10 p-value", 
        color = "") +
   theme_bw()
 ```
@@ -408,109 +463,111 @@ sva_corrected[top10$genes, ] %>%
 
 ## Functional Enrichment Analysis
 
-```{r functional-enrichment-complete, message=FALSE, warning=FALSE}
-# --- 1. Data Preparation (ENSEMBL to ENTREZID Mapping & Aggregation) ---
-
-# Create a temporary data frame of LogFC values and ENSEMBL IDs
+```{r functional-enrichment}
+#Create a temporary data frame of LogFC values and ENSEMBL IDs
 temp_df <- results$table %>%
   rownames_to_column(var = "ENSEMBL") %>%
   dplyr::select(ENSEMBL, logFC, PValue) 
 
-# Convert Ensembl IDs to Entrez IDs (mapping table)
+#I have ENSEMBL IDs but clusterProfiler wants ENTREZ IDs
 eg_mapping <- bitr(temp_df$ENSEMBL, 
-           fromType="ENSEMBL",  
-           toType="ENTREZID", 
-           OrgDb="org.Hs.eg.db") %>%
-  # Filter out multiple mappings for the same ENSEMBL ID
+                   fromType = "ENSEMBL",
+                   toType = "ENTREZID", 
+                   OrgDb = "org.Hs.eg.db") %>%
+  #Keep only one ENTREZ ID mapped to an ENSEMBL ID. Might have many to one
   distinct(ENSEMBL, .keep_all = TRUE) 
 
-# Create the FINAL RANKED LIST (Unique Entrez IDs with Aggregated LogFC)
-ranked_df_final <- temp_df %>%
-  # Join LogFC results with the Entrez ID mapping table
+df_final <- temp_df %>%
+  #Join LogFC results with the Entrez ID mapping table
   inner_join(eg_mapping, by = "ENSEMBL") %>%
-  
-  # Resolve the many-to-one problem: group by Entrez ID
+  #Group by Entrez ID
   group_by(ENTREZID) %>%
-  # Summarize by taking the max LogFC (largest signal)
+  #Keep the largest signal
   summarise(logFC = max(logFC)) %>%
   ungroup()
 
-# Create the Final Ranked List for GSEA (sorted numeric vector)
-ranked_gene_list <- ranked_df_final$logFC
-names(ranked_gene_list) <- ranked_df_final$ENTREZID
+#Create the final sorted numeric vector of logFC for GSEA
+ranked_gene_list <- df_final$logFC
+names(ranked_gene_list) <- df_final$ENTREZID
 ranked_gene_list <- sort(ranked_gene_list, decreasing = TRUE)
 
-# Create the Final Significant List for ORA (the 7 strongest DEGs)
+#We need to identify genes of interest for ORA
 ora_degs_entrez <- temp_df %>%
-  filter(PValue < 0.001) %>%
+  #No gene had FDR < 0.05, so I will use the same criteria I used to identify 
+  #up- and down-regulated genes in the above volcano plot
+  filter(PValue < pval_threshold & abs(logFC) >= fc_threshold) %>%
   inner_join(eg_mapping, by = "ENSEMBL") %>%
   distinct(ENTREZID, .keep_all = TRUE)
 
-# --- 2. GSEA Analysis (KEGG and GO) ---
+#GSEA Analysis
 
-# GSEA for KEGG Pathways
-gsea_results_kegg <- gseKEGG(
-  geneList = ranked_gene_list, 
-  organism = 'hsa', 
-  nPerm = 1000, 
-  pvalueCutoff = 0.25, 
-  verbose = FALSE
-)
+#KEGG
+gsea_results_kegg <- gseKEGG(geneList = ranked_gene_list,
+                             #hsa is homo sapien
+                             organism = 'hsa', 
+                             nPerm = 1000, 
+                             pvalueCutoff = 0.05, 
+                             verbose = FALSE)
 
-# GSEA for Gene Ontology (GO - ALL domains)
-gsea_results_go <- gseGO(
-  geneList = ranked_gene_list, 
-  OrgDb = org.Hs.eg.db, 
-  ont = "ALL",         
-  keyType = "ENTREZID",
-  pvalueCutoff = 0.25, 
-  verbose = FALSE
-)
+#Gene Ontology
+gsea_results_go <- gseGO(geneList = ranked_gene_list, 
+                         OrgDb = org.Hs.eg.db, 
+                         ont = "ALL",
+                         keyType = "ENTREZID",
+                         pvalueCutoff = 0.05, 
+                         verbose = FALSE)
 
-# --- 3. ORA Analysis (KEGG and GO) ---
+#ORA
 
-# ORA for KEGG Pathways
-ora_results_kegg <- enrichKEGG(
-  gene = ora_degs_entrez$ENTREZID, 
-  organism = 'hsa', 
-  pvalueCutoff = 0.05, 
-  qvalueCutoff = 0.20 
-)
+#KEGG
+ora_results_kegg <- enrichKEGG(gene = ora_degs_entrez$ENTREZID, 
+                               organism = 'hsa', 
+                               pvalueCutoff = 0.05, 
+                               qvalueCutoff = 0.20)
 
-# ORA for Gene Ontology (GO - ALL domains)
-ora_results_go <- enrichGO(
-  gene = ora_degs_entrez$ENTREZID, 
-  OrgDb = org.Hs.eg.db,
-  ont = "ALL",                     
-  keyType = "ENTREZID",
-  pvalueCutoff = 0.05, 
-  qvalueCutoff = 0.20
-)
+#Gene Ontology
+ora_results_go <- enrichGO(gene = ora_degs_entrez$ENTREZID, 
+                           OrgDb = org.Hs.eg.db,
+                           ont = "ALL",                     
+                           keyType = "ENTREZID",
+                           pvalueCutoff = 0.05, 
+                           qvalueCutoff = 0.20)
 
-# --- 4. Final Results Combination and Visualization ---
+#Combine results for table
 
 tab.num <- tab.num + 1
 
 # A. Process GSEA Results (KEGG & GO)
-gsea_table_kegg <- gsea_results_kegg@result %>% mutate(Method = "GSEA_KEGG")
-gsea_table_go <- gsea_results_go@result %>% mutate(Method = paste0("GSEA_", ONTOLOGY))
+gsea_table_kegg <- gsea_results_kegg@result %>% 
+  mutate(Method = "GSEA: KEGG")
+
+gsea_table_go <- gsea_results_go@result %>% 
+  mutate(Method = paste0("GSEA: ", 
+                         case_when(ONTOLOGY == "BP" ~ "Biological Process",
+                                   ONTOLOGY == "MF" ~ "Molecular Function", 
+                                   ONTOLOGY == "CC" ~ "Cellular Component")))
 
 gsea_final_table <- bind_rows(gsea_table_kegg, gsea_table_go) %>%
-  filter(p.adjust < 0.25) %>%
-  dplyr::select(ID, Description, setSize, enrichmentScore, NES, pvalue, p.adjust, Method) %>%
-  mutate(across(c(enrichmentScore, NES, pvalue, p.adjust), round, 4))
+  filter(p.adjust < 0.05) %>%
+  dplyr::select(ID, Description, setSize, pvalue, p.adjust, Method) %>%
+  mutate(across(c(pvalue, p.adjust), round, 4))
 
 # B. Process ORA Results (KEGG & GO)
-ora_table_kegg <- data.frame(ora_results_kegg) %>% mutate(Method = "ORA_KEGG")
-ora_table_go <- data.frame(ora_results_go) %>% mutate(Method = paste0("ORA_", ONTOLOGY))
+ora_table_kegg <- data.frame(ora_results_kegg) %>% 
+  mutate(Method = "ORA: KEGG")
+
+ora_table_go <- data.frame(ora_results_go) %>% 
+  mutate(Method = paste0("ORA: ", 
+                         case_when(ONTOLOGY == "BP" ~ "Biological Process",
+                                   ONTOLOGY == "MF" ~ "Molecular Function", 
+                                   ONTOLOGY == "CC" ~ "Cellular Component")))
 
 ora_final_table <- bind_rows(ora_table_kegg, ora_table_go) %>%
-  filter(p.adjust < 0.20) %>%
+  filter(p.adjust < 0.2) %>%
   dplyr::select(ID, Description, Count, pvalue, p.adjust, Method) %>%
   mutate(setSize = Count,
-         enrichmentScore = NA, NES = NA,
          across(c(pvalue, p.adjust), round, 4)) %>%
-  dplyr::select(ID, Description, setSize, enrichmentScore, NES, pvalue, p.adjust, Method)
+  dplyr::select(ID, Description, setSize, pvalue, p.adjust, Method)
 
 # C. Combine, Sort, and Display the Final Table
 final_enrichment_results <- bind_rows(gsea_final_table, ora_final_table) %>%
@@ -518,7 +575,8 @@ final_enrichment_results <- bind_rows(gsea_final_table, ora_final_table) %>%
 
 DT::datatable(final_enrichment_results, 
               rownames = FALSE, 
-              caption = paste0("Table ", tab.num, ": Significant Functional Enrichment Results (All Methods Combined)"),
+              caption = paste0("Table ", tab.num, 
+                               ": Significant Functional Enrichment Results (All Methods Combined)"),
               options = list(pageLength = 10, scrollX = TRUE))
 ```
 
