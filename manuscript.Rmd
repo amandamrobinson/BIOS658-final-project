@@ -20,9 +20,16 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE, error = FALSE,
 
 # Methods
 
+We obtained Bulk RNA-seq data through GEO Accession GSE231347. Data were restricted to T105 and subjects with measurements at both the stress test and control visits. We filtered out genes with low expression using `filterByExpr` from `edgeR` (Chen et al. 2016). We then normalized the data using trimmed mean of M-values (TMM) method via the `edgeR` `calcNormFactors` function."
+
+There were no known batch effects for this data. However the nature of the experimental design required subjects to be measured on different days, so we elected to correct for any latent batch effects using surrogate variable analysis (SVA). The number of SVs estimated by Leek's method was relatively high compared to our sample size, so we instead used the less conservative Buja and Eyuboglu estimate.    
+
+We used `edgeR` with quasi-likelihood (QL) estimation for differential expression analysis. Expression was modeled with fixed effects for MDD phenotype, visit condition (stress vs no stress), an interaction between the two, and SVs. While clinical measurements were included in the original analysis, they were not available on GEO. We could not include them in this analysis. We were not able to account for repeated measurements within a subject as the `edgeR` QL framework does not support mixed effects model. Differential expression was based on the QL F-test applied to the MDD phenotype/visit condition interaction term.
+
+We examined functional enrichment via over-representation (ORA) and gene set enrichment analysis (GSEA) using both the Kyoto Encyclopedia of Genes and Genomes and Gene Ontology databases. Genes with $log_2 FC > 1$ and $p < 0.05$ identified during differential expression analysis were included in ORA. A list of genes ordered by $log_2FC$ was used for GSEA. We defined enriched pathways as those with either $FDR < 0.05$ in GSEA or $q < 0.2$ in ORA.   
+
 # Results
 
-## Quality Assessment
 
 ```{r data}
 library(tidyverse)
@@ -77,7 +84,16 @@ phenotype <- pData(gse_data) %>%
 #Restrict gene_counts to only those observations retained in phenotype after 
 #filtering
 gene_counts <- gene_counts[, c("gene", phenotype$title)]
+
+n_summ <-phenotype %>%
+  distinct(id, .keep_all = TRUE) %>%
+  count(mdd_phenotype)
 ```
+
+
+We identified `r nrow(n_summ)` subjects meeting the inclusion criteria, of which `r n_summ$n[1]` were diagnosed with hyperphagia and `n_summ$n[2]` were diagnosed with hypophagia.
+
+## Quality Assessment
 
 ```{r qa-library-size}
 library_size <- gene_counts %>%
@@ -87,7 +103,10 @@ library_size <- gene_counts %>%
 
 #Summary statistics for text
 lib_summ <- round(quantile(library_size, c(0.25, 0.5, 0.75))/1000000, 1)
+lib_text <- paste0(lib_summ[2], "[IQR: ", lib_summ[1], ", ", lib_summ[3], "]")
 ```
+
+**Figure `r fig.num + 1`** shows the distribution of library size in millions. Median library size was `r lib_text` million. 
 
 ```{r qa-library-size-fig}
 fig.num <- fig.num + 1
@@ -114,9 +133,11 @@ log2_q3_range <- gene_counts_long %>%
   #Find Q3
   summarise(q3 = quantile(log2_count, 0.75)) %>%
   #The find the min and max Q3
-  summarise(min = min(q3), 
-            max = max(q3))
+  summarise(min = round(min(q3), 1), 
+            max = round(max(q3), 1))
 ```
+
+**Figure `r fig.num + 1`** shows the distribution of $log_2$ gene count by sample. Most genes were not expressed across all samples. The minimum 75th percentile observed was `r log2_q3_range$min[1]` while the maximum was `r log2_q3_range$max[1]`.
 
 ```{r qa-count-distribution-fig}
 fig.num <- fig.num + 1
@@ -149,6 +170,7 @@ rownames(gene_counts) <- genes
 # phenotype$title == colnames(gene_counts)
 ```
 
+**Figure `r fig.num + 1`** shows the Pearson correlation for $logCPM$ between samples. Observations from the same subject tended to be clustered together.
 
 ```{r qa-sample-correlation}
 fig.num <- fig.num + 1
@@ -235,6 +257,8 @@ colnames(sv_mat) <- paste0("SV", 1:ncol(sv_mat))
 phenotype <- cbind(phenotype, sv_mat) 
 ```
 
+**Table `r tab.num + 1`** summarizes the results of principal components analysis (PCA) before and after batch correction with SVA. The first two PCs accounted for 26% of the variance in $log_2CPM$ before batch correction and 17% after batch correction.
+
 ```{r pca-tab}
 tab.num <- tab.num + 1
 
@@ -269,6 +293,8 @@ rbind(summary(pca)$importance,
                 scrollX = TRUE))
 ```
 
+**Figure `r fig.num + 1`** shows the first two PCs by MDD phenotype, visit condition, and batch effect correction. There is some separation between MDD phenotypes after the stress test both before and after correcting for SVs. There is no such separation observed for the control measurements.
+
 ```{r pca-fig}
 fig.num <- fig.num + 1
 
@@ -294,7 +320,7 @@ phenotype %>%
   ggplot() + 
   geom_point(aes(x = pc1, y = pc2, color = mdd_phenotype)) +
   labs(title = paste0("Figiure ", fig.num, 
-                      ": Principle Components by Condition, Batch Effect Correction, and MDD Phenotype"), 
+                      ": Principle Components by MDD Phenotype, Batch Effect Correction, and Condition"), 
        x = "PC1", 
        y = "PC2", 
        color = "Phagia") +
@@ -302,6 +328,8 @@ phenotype %>%
   facet_grid(condition~method) +
   theme(legend.position = "bottom")
 ```
+
+**Figure `r fig.num + 1`** shows hierarchical clustering of the top 10 most variable genes prior to batch effect correction. Observations from the same subject are clustered together, and subjects were further clustered by MDD phenotype.
 
 ```{r hierarchical-clustering-1}
 fig.num <- fig.num + 1
@@ -330,6 +358,8 @@ pheatmap(
   fontsize = 8
 )
 ```
+
+**Figure `r fig.num + 1`** shows hierarchical clustering of the top 10 most variable genes after batch effect correction. Observations remain clustered around subject and MDD phenotype, though less strongly.
 
 ```{r hierarchical-clustering-2}
 fig.num <- fig.num + 1
@@ -382,22 +412,31 @@ results <- topTags(qlf_interaction,
 
 #results is ordered by ascending p-value
 top10 <- results$table[1:10, ]
-```
 
-```{r volcano-plot}
-fig.num <- fig.num + 1
-
+#Data for volcano plot
 fc_threshold <- 1  # log2FC threshold
 pval_threshold <- 0.05
 
-results$table %>%
+volcano_data <- results$table %>%
   mutate(neg_log10_p = -log10(PValue),
          status = case_when(PValue < pval_threshold & logFC >= 1 ~ 
                               "Upregulated",
                             PValue < pval_threshold & logFC <= -1 ~ 
                               "Downregulated",
                             TRUE ~ "Not Significant"), 
-         label = ifelse(genes %in% top10$genes, genes, "")) %>% 
+         label = ifelse(genes %in% top10$genes, genes, "")) 
+
+volcano_text <- volcano_data %>%
+  filter(status != "Not Significant") %>%
+  count(status)
+```
+
+**Figure `r fig.num + 1`** summarizes the statistical significance and magnitude of the MDD phenotype visit/interaction term. The volcano plot is generally symmetric. There were `r sum(volcano_data$n)` differentially expressed genes, of which `r volcano_text[2]` were upregulated and `r volcano_text[1]` were downregulated.
+
+```{r volcano plot}
+fig.num <- fig.num + 1
+
+volcano_data %>% 
   ggplot() + 
   geom_point(aes(x = logFC, y = neg_log10_p, color = fct_rev(status))) +
   scale_color_manual(values = c("Upregulated" = "red",
@@ -412,11 +451,15 @@ results$table %>%
                   size = 3, max.overlaps = 15) +
   labs(title = paste0("Figure ", fig.num, 
                       ": Volcano Plot with Top Gene Labels"), 
+       subtitle = paste0("Thresholds: |Log2FC| \u2265 ", fc_threshold, 
+                         " and P-value \u2264 ", pval_threshold), 
        x = "LogFC", 
        y = "-Log10 p-value", 
        color = "") +
   theme_bw()
 ```
+
+**Table `r tab.num + 1`** summarizes the top 10 most differentially expressed genes, none of which met the FDR < 0.05 threshold for statistical significance.
 
 ```{r top10-tab}
 tab.num <- tab.num + 1
@@ -438,6 +481,8 @@ top10 %>%
                 paging = TRUE, 
                 scrollX = TRUE))
 ```
+
+**Figure `r fig.num + 1`** shows the distribution of SVA corrected $log_2CPM$ by MDD phenotype, condition, and gene for the top 10 most differentially expressed genes. Most genes showed a slight change in expression between control and stress test visits within MDD phenotypes. Additionally, genes that tended to be upregulated during stress for subjects with hypophagia tended to be downregulated in those with hyperpagia and vice versa.
 
 ```{r boxplot}
 fig.num <- fig.num + 1
@@ -535,8 +580,6 @@ ora_results_go <- enrichGO(gene = ora_degs_entrez$ENTREZID,
 
 #Combine results for table
 
-tab.num <- tab.num + 1
-
 # A. Process GSEA Results (KEGG & GO)
 gsea_table_kegg <- gsea_results_kegg@result %>% 
   mutate(Method = "GSEA: KEGG")
@@ -572,6 +615,12 @@ ora_final_table <- bind_rows(ora_table_kegg, ora_table_go) %>%
 # C. Combine, Sort, and Display the Final Table
 final_enrichment_results <- bind_rows(gsea_final_table, ora_final_table) %>%
   arrange(p.adjust)
+```
+
+**Table `r tab.num + 1`** summarizes the enriched pathways identified during ORA and GSEA. Several processes related to immune response were identified.
+
+```{r functional-enrichment-tab}
+tab.num <- tab.num + 1
 
 DT::datatable(final_enrichment_results, 
               rownames = FALSE, 
